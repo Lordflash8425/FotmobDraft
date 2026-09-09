@@ -20,6 +20,7 @@ async function requestText(url, options = {}) {
   const cacheKey = `${url}|${options.mode || 'fotmob'}`;
   const hit = cache.get(cacheKey);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.data;
+
   const r = await fetch(url, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (compatible; FotMobFantasyDraft/1.0)',
@@ -35,18 +36,25 @@ async function requestText(url, options = {}) {
 }
 
 async function requestJina(url, mode = 'page') {
+  // Do not request ReaderLM-v2 here. FotMob's stats page is already structured
+  // text, and the normal Reader browser engine is both cheaper and more stable.
   const headers = mode === 'page'
     ? {
-        'Accept': 'text/plain',
-        'X-Engine': 'browser',
-        'X-Respond-With': 'markdown',
-        'X-Timeout': '30'
+        'Accept': 'application/json',
+        'X-Token-Budget': '100000'
       }
     : {
         'Accept': 'application/json',
-        'X-Respond-With': 'text'
+        'X-Token-Budget': '100000'
       };
-  return requestText(JINA + url, { mode: `jina-${mode}`, headers });
+
+  const raw = await requestText(JINA + url, { mode: `jina-${mode}`, headers });
+  try {
+    const data = JSON.parse(raw);
+    if (typeof data?.content === 'string') return data.content;
+    if (typeof data?.data?.content === 'string') return data.data.content;
+  } catch {}
+  return raw;
 }
 
 async function fotmob(pathname, params = {}) {
@@ -57,6 +65,21 @@ async function fotmob(pathname, params = {}) {
   const text = await requestText(url.toString());
   try { return JSON.parse(text); }
   catch { throw new Error(`FotMob returned non-JSON data for ${pathname}`); }
+}
+
+async function getSeasonData() {
+  try {
+    return await fotmob('/api/data/leagues', { id: LEAGUE_ID });
+  } catch (directError) {
+    // FotMob sometimes serves a bot challenge to Vercel's outbound IPs. The
+    // public league metadata is also available through Jina's browser reader.
+    const url = `${FOTMOB}/api/data/leagues?id=${LEAGUE_ID}`;
+    const text = await requestJina(url, 'api');
+    try { return JSON.parse(text); }
+    catch {
+      throw new Error(`Could not load FotMob season data. Direct: ${directError.message}`);
+    }
+  }
 }
 
 function num(v) {
@@ -157,19 +180,23 @@ function parseJinaRatingPage(text) {
   const lines = String(text).split(/\r?\n/);
 
   for (const line of lines) {
-    const clean = line.replace(/\*\*/g, '').replace(/\s+/g, ' ').trim();
+    const clean = line
+      .replace(/\*\*/g, '')
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/\s+/g, ' ')
+      .trim();
     if (!clean) continue;
 
+    // Current FotMob/Jina row shape:
+    // "1. 1 Jack Hinshelwood Player of the Match: 1 9.01"
     let m = clean.match(/^\d+[.)]?\s+(?:\d+\s+)?(.+?)\s+Player of the Match:\s*\d+\s+(\d+(?:[.,]\d+)?)\s*$/i);
     if (!m) m = clean.match(/^\d+[.)]?\s+(?:\d+\s+)?(.+?)\s+(\d+[.,]\d{2})\s*$/);
     if (!m) continue;
 
-    let name = m[1].trim().replace(/\s+Player of the Match:.*$/i, '').trim();
+    const name = m[1].trim().replace(/\s+Player of the Match:.*$/i, '').trim();
     const rating = num(m[2]);
     if (!name || rating === null || rating <= 0 || rating >= 10) continue;
 
-    // Some renderers append a club name immediately after the player. Keep the
-    // player name clean enough for search while retaining the rating exactly.
     const base = slugId(name);
     const count = seen.get(base) || 0;
     seen.set(base, count + 1);
@@ -190,10 +217,6 @@ function parseJinaRatingPage(text) {
   return [...unique.values()].sort((a, b) => b.rating - a.rating || a.name.localeCompare(b.name));
 }
 
-async function getSeasonData() {
-  return fotmob('/api/data/leagues', { id: LEAGUE_ID });
-}
-
 async function getRatings(season) {
   const meta = await getSeasonData();
   const seasons = Array.isArray(meta.seasons) ? meta.seasons : [];
@@ -203,13 +226,11 @@ async function getRatings(season) {
   const canonical = String(match?.id || requested);
 
   const pageUrls = [
+    `${FOTMOB}/leagues/${LEAGUE_ID}/stats/season/${canonical}/players/rating/premier-league-players-1000`,
     `${FOTMOB}/leagues/${LEAGUE_ID}/stats/season/${canonical}/players/rating/premier-league-1000-players`,
-    `${FOTMOB}/leagues/${LEAGUE_ID}/stats/season/${canonical}/players/rating/premier-league-players-1000`
+    `${FOTMOB}/leagues/${LEAGUE_ID}/stats/season/${canonical}/players/rating/premier-league-teams-players`
   ];
 
-  // FotMob currently protects ordinary server-side HTTP clients with anti-bot
-  // challenges. Jina Reader uses a browser-backed fetch and gives us the same
-  // public stats page without requiring cookies or a FotMob session.
   for (const pageUrl of pageUrls) {
     try {
       const text = await requestJina(pageUrl, 'page');
@@ -231,8 +252,6 @@ async function getRatings(season) {
     }
   }
 
-  // Structured API fallback. This route is documented as the league-season
-  // player-stat table and normally returns statsData/statValue.
   try {
     const data = await fotmob('/api/data/leagueseasondeepstats', {
       id: LEAGUE_ID, season: canonical, type: 'players', stat: 'rating'
@@ -243,8 +262,6 @@ async function getRatings(season) {
     console.warn('Direct FotMob API fallback failed:', e.message);
   }
 
-  // Last resort: let Jina proxy the structured endpoint itself. This is useful
-  // when FotMob serves JSON to browsers but challenges direct server requests.
   try {
     const apiUrl = `${FOTMOB}/api/data/leagueseasondeepstats?id=${LEAGUE_ID}&season=${encodeURIComponent(canonical)}&type=players&stat=rating`;
     const text = await requestJina(apiUrl, 'api');
