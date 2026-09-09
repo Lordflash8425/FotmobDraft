@@ -62,9 +62,18 @@ function walkForPlayers(node, out, context = {}) {
     if (node[key] !== undefined && node[key] !== null) merged[key] = node[key];
   }
 
-  const name = node.name ?? node.playerName ?? node.fullName;
-  const id = normalizeId(node.id ?? node.playerId);
-  const rating = num(node.rating ?? node.averageRating ?? node.avgRating);
+  // FotMob's deep-stat table stores the player identity separately from the
+  // stat value. Support both the old flat shape and the current nested shape.
+  const player = node.player && typeof node.player === 'object' ? node.player : {};
+  const statValue = node.statValue && typeof node.statValue === 'object' ? node.statValue : {};
+
+  const name = node.name ?? node.playerName ?? node.fullName
+    ?? player.name ?? player.playerName ?? player.fullName;
+  const id = normalizeId(node.id ?? node.playerId ?? player.id ?? player.playerId);
+  const rating = num(
+    node.rating ?? node.averageRating ?? node.avgRating
+    ?? statValue.value ?? statValue.rating ?? statValue.averageRating
+  );
 
   if (name && id && rating !== null && rating > 0 && rating < 10) {
     const existing = out.get(id);
@@ -73,11 +82,11 @@ function walkForPlayers(node, out, context = {}) {
         id,
         name,
         rating,
-        teamId: node.teamId ?? node.team?.id ?? merged.teamId ?? null,
-        teamName: node.teamName ?? node.team?.name ?? merged.teamName ?? null,
-        position: node.position ?? node.pos ?? merged.position ?? null,
-        appearances: num(node.appearances ?? node.matches ?? node.gamesPlayed ?? node.played),
-        photo: node.photo ?? node.image ?? node.img ?? null
+        teamId: node.teamId ?? node.team?.id ?? player.teamId ?? player.team?.id ?? merged.teamId ?? null,
+        teamName: node.teamName ?? node.team?.name ?? player.teamName ?? player.team?.name ?? merged.teamName ?? null,
+        position: node.position ?? node.pos ?? player.position ?? player.pos ?? merged.position ?? null,
+        appearances: num(node.appearances ?? node.matches ?? node.gamesPlayed ?? node.played ?? player.appearances ?? player.matches),
+        photo: node.photo ?? node.image ?? node.img ?? player.photo ?? player.image ?? player.img ?? null
       });
     }
   }
@@ -95,7 +104,6 @@ function parsePlayers(data) {
 }
 
 async function getSeasonData() {
-  // Current FotMob API uses /api/data/* routes.
   return fotmob('/api/data/leagues', { id: LEAGUE_ID });
 }
 
@@ -132,7 +140,6 @@ async function getRatings(season) {
     }
   }
 
-  // Fallback: the league response can contain the player stat table too.
   for (const candidate of candidates) {
     try {
       const data = await fotmob('/api/data/leagues', { id: LEAGUE_ID, season: candidate });
