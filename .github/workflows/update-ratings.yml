@@ -1,0 +1,46 @@
+name: Update FotMob ratings
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'public/players.json'
+  schedule:
+    - cron: '15 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Playwright
+        run: |
+          npm install --no-save playwright
+          npx playwright install --with-deps chromium
+
+      - name: Fetch current FotMob ratings
+        run: node scripts/update-ratings.mjs
+
+      - name: Commit ratings snapshot
+        run: |
+          git config user.name 'fotmob-ratings-bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add public/players.json
+          if git diff --cached --quiet; then
+            echo 'No rating changes.'
+          else
+            git commit -m 'Update FotMob ratings [skip ci]'
+            git push
+          fi
