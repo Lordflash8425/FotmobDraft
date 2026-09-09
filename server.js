@@ -5,7 +5,6 @@ import { fileURLToPath } from 'node:url';
 const app = express();
 const PORT = process.env.PORT || 3000;
 const FOTMOB = 'https://www.fotmob.com';
-const DATA = 'https://data.fotmob.com';
 const LEAGUE_ID = 47;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -16,31 +15,31 @@ app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.h
 const cache = new Map();
 const CACHE_MS = 10 * 60 * 1000;
 
-async function getJson(base, pathname, params = {}) {
-  const url = new URL(base + pathname);
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v));
-  }
-  const key = url.toString();
-  const hit = cache.get(key);
+async function requestText(url) {
+  const hit = cache.get(url);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.data;
-
-  const r = await fetch(key, {
+  const r = await fetch(url, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (compatible; FotMobFantasyDraft/1.0)',
-      'Accept': 'application/json,text/plain,*/*'
+      'Accept': 'text/html,application/json,text/plain,*/*',
+      'Accept-Language': 'en-US,en;q=0.9'
     }
   });
   const text = await r.text();
-  if (!r.ok) throw new Error(`FotMob request failed (${r.status}) at ${pathname}`);
-  let data;
-  try { data = JSON.parse(text); }
-  catch { throw new Error(`FotMob returned non-JSON data for ${pathname}`); }
-  cache.set(key, { at: Date.now(), data });
-  return data;
+  if (!r.ok) throw new Error(`FotMob request failed (${r.status}) at ${url}`);
+  cache.set(url, { at: Date.now(), data: text });
+  return text;
 }
 
-const fotmob = (pathname, params) => getJson(FOTMOB, pathname, params);
+async function fotmob(pathname, params = {}) {
+  const url = new URL(FOTMOB + pathname);
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v));
+  }
+  const text = await requestText(url.toString());
+  try { return JSON.parse(text); }
+  catch { throw new Error(`FotMob returned non-JSON data for ${pathname}`); }
+}
 
 function num(v) {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
@@ -60,6 +59,7 @@ function addPlayer(out, row, context = {}) {
   const participant = row.participant && typeof row.participant === 'object' ? row.participant : {};
   const player = row.player && typeof row.player === 'object' ? row.player : {};
   const statValue = row.statValue && typeof row.statValue === 'object' ? row.statValue : {};
+  const stat = row.stat && typeof row.stat === 'object' ? row.stat : {};
   const team = row.team && typeof row.team === 'object' ? row.team : {};
 
   const name = row.name ?? row.playerName ?? row.fullName ?? row.participantName
@@ -67,9 +67,9 @@ function addPlayer(out, row, context = {}) {
   const id = normalizeId(row.id ?? row.playerId ?? row.participantId ?? row.particpiantId
     ?? row.participant_id ?? participant.id ?? player.id ?? player.playerId ?? player.participantId);
   const rating = num(row.rating ?? row.averageRating ?? row.avgRating ?? row.value
-    ?? participant.value ?? participant.statValue
+    ?? participant.value ?? statValue.value ?? stat.value
     ?? (typeof row.statValue === 'string' ? row.statValue : null)
-    ?? statValue.value ?? statValue.num ?? statValue.rating ?? statValue.averageRating
+    ?? statValue.num ?? statValue.rating ?? statValue.averageRating
     ?? statValue.displayValue ?? statValue.formatted);
 
   if (!name || !id || rating === null || rating <= 0 || rating >= 10) return;
@@ -89,21 +89,6 @@ function addPlayer(out, row, context = {}) {
   }
 }
 
-function parsePlayers(data) {
-  const out = new Map();
-  const statsData = Array.isArray(data?.statsData) ? data.statsData : [];
-  for (const row of statsData) addPlayer(out, row);
-
-  // data.fotmob.com season files use TopLists -> StatList.
-  for (const board of (Array.isArray(data?.TopLists) ? data.TopLists : [])) {
-    const rows = Array.isArray(board?.StatList) ? board.StatList : [];
-    for (const row of rows) addPlayer(out, row);
-  }
-
-  if (out.size < 20) walk(data, out);
-  return [...out.values()];
-}
-
 function walk(node, out, context = {}) {
   if (!node || typeof node !== 'object') return;
   if (Array.isArray(node)) {
@@ -121,6 +106,26 @@ function walk(node, out, context = {}) {
   }
 }
 
+function parsePlayers(data) {
+  const out = new Map();
+  walk(data, out);
+  return [...out.values()];
+}
+
+function extractJsonScripts(html) {
+  const results = [];
+  const re = /<script[^>]*type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    try { results.push(JSON.parse(m[1])); } catch {}
+  }
+  const next = html.match(/<script[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i);
+  if (next) {
+    try { results.push(JSON.parse(next[1])); } catch {}
+  }
+  return results;
+}
+
 async function getSeasonData() {
   return fotmob('/api/data/leagues', { id: LEAGUE_ID });
 }
@@ -133,29 +138,34 @@ async function getRatings(season) {
     || seasons.find(x => String(x.name ?? '').replace('-', '/') === requested);
   const canonical = String(match?.id || requested);
 
-  // This is the important path: FotMob publishes the complete season stat
-  // board as data.fotmob.com/stats/<league>/season/<season>/rating.json.
-  // Unlike leagueseasondeepstats, this feed is not the truncated ~62-row
-  // table we were receiving before.
-  const candidates = [canonical, canonical.replace('-', '/')];
-  for (const seasonId of candidates) {
-    try {
-      const data = await getJson(DATA, `/stats/${LEAGUE_ID}/season/${seasonId}/rating.json`);
-      const players = parsePlayers(data)
-        .sort((a, b) => b.rating - a.rating || a.name.localeCompare(b.name));
-      if (players.length > 20) return { season: canonical, players };
-    } catch (e) {
-      console.warn(e.message);
+  // The public FotMob stats page has an explicit 1000-player route. Search
+  // results confirm that this route exposes ranks well beyond the first 62.
+  // Read its server-rendered JSON instead of the truncated deepstats table.
+  const pageUrl = `${FOTMOB}/leagues/${LEAGUE_ID}/stats/season/${canonical}/players/rating/premier-league-players-1000`;
+  try {
+    const html = await requestText(pageUrl);
+    const scripts = extractJsonScripts(html);
+    const merged = new Map();
+    for (const script of scripts) {
+      for (const p of parsePlayers(script)) {
+        const existing = merged.get(p.id);
+        if (!existing || p.rating > existing.rating) merged.set(p.id, p);
+      }
     }
+    const players = [...merged.values()].sort((a, b) => b.rating - a.rating || a.name.localeCompare(b.name));
+    if (players.length > 20) return { season: canonical, players };
+  } catch (e) {
+    console.warn('Stats page scrape failed:', e.message);
   }
 
-  // Fallback to the API endpoint if the CDN season file is unavailable.
+  // Reliable API fallback. This may return only the currently ranked subset,
+  // but it is better than failing the entire draft if the page is unavailable.
   const data = await fotmob('/api/data/leagueseasondeepstats', {
     id: LEAGUE_ID, season: canonical, type: 'players', stat: 'rating'
   });
   const players = parsePlayers(data).sort((a, b) => b.rating - a.rating || a.name.localeCompare(b.name));
   if (players.length > 20) return { season: canonical, players };
-  throw new Error('Could not find the complete Premier League player rating table from FotMob.');
+  throw new Error('Could not read the Premier League player rating table from FotMob.');
 }
 
 app.get('/api/seasons', async (_req, res) => {
