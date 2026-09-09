@@ -58,9 +58,14 @@ function addPlayer(out, row, context = {}) {
   const statValue = row.statValue && typeof row.statValue === 'object' ? row.statValue : {};
   const team = row.team && typeof row.team === 'object' ? row.team : {};
 
+  // FotMob's deep-stat rows can use either player/id naming or the
+  // participantName/participantId naming used by its DeepStat model.
   const name = row.name ?? row.playerName ?? row.fullName
+    ?? row.participantName ?? row.participant_name ?? row.entityName
     ?? player.name ?? player.playerName ?? player.fullName;
-  const id = normalizeId(row.id ?? row.playerId ?? player.id ?? player.playerId);
+  const id = normalizeId(row.id ?? row.playerId ?? row.participantId
+    ?? row.particpiantId ?? row.participant_id ?? row.entityId
+    ?? player.id ?? player.playerId ?? player.participantId);
   const rating = num(
     row.rating ?? row.averageRating ?? row.avgRating
     ?? row.value
@@ -134,28 +139,12 @@ async function getRatings(season) {
   let lastError = null;
   const merged = new Map();
 
-  // FotMob's table can return a limited first page. Request several common
-  // pagination shapes and merge the rows so the draft sees the full player pool.
   const variants = [
-    {},
-    { page: 1 },
-    { page: 2 },
-    { page: 3 },
-    { page: 4 },
-    { page: 5 },
-    { page: 6 },
-    { page: 7 },
-    { page: 8 },
-    { limit: 100 },
-    { limit: 200 },
-    { limit: 500 },
-    { limit: 1000 },
-    { page: 1, limit: 100 },
-    { page: 2, limit: 100 },
-    { page: 3, limit: 100 },
-    { page: 4, limit: 100 },
-    { page: 5, limit: 100 },
-    { page: 6, limit: 100 }
+    {}, { page: 1 }, { page: 2 }, { page: 3 }, { page: 4 }, { page: 5 },
+    { page: 6 }, { page: 7 }, { page: 8 }, { limit: 100 }, { limit: 200 },
+    { limit: 500 }, { limit: 1000 }, { page: 1, limit: 100 },
+    { page: 2, limit: 100 }, { page: 3, limit: 100 }, { page: 4, limit: 100 },
+    { page: 5, limit: 100 }, { page: 6, limit: 100 }
   ];
 
   for (const candidate of candidates) {
