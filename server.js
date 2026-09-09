@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 const app = express();
 const PORT = process.env.PORT || 3000;
 const FOTMOB = 'https://www.fotmob.com';
+const DATA = 'https://data.fotmob.com';
 const LEAGUE_ID = 47;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -15,8 +16,8 @@ app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.h
 const cache = new Map();
 const CACHE_MS = 10 * 60 * 1000;
 
-async function fotmob(pathname, params = {}) {
-  const url = new URL(FOTMOB + pathname);
+async function getJson(base, pathname, params = {}) {
+  const url = new URL(base + pathname);
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, String(v));
   }
@@ -39,40 +40,37 @@ async function fotmob(pathname, params = {}) {
   return data;
 }
 
+const fotmob = (pathname, params) => getJson(FOTMOB, pathname, params);
+
 function num(v) {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
   if (typeof v === 'string') {
-    const cleaned = v.replace(',', '.').replace(/[^0-9.+-]/g, '');
-    const n = Number(cleaned);
+    const n = Number(v.replace(',', '.').replace(/[^0-9.+-]/g, ''));
     return Number.isFinite(n) ? n : null;
   }
   return null;
 }
 
-function normalizeId(v) { return v === undefined || v === null ? null : String(v); }
+function normalizeId(v) {
+  return v === undefined || v === null ? null : String(v);
+}
 
 function addPlayer(out, row, context = {}) {
   if (!row || typeof row !== 'object' || Array.isArray(row)) return;
-
+  const participant = row.participant && typeof row.participant === 'object' ? row.participant : {};
   const player = row.player && typeof row.player === 'object' ? row.player : {};
   const statValue = row.statValue && typeof row.statValue === 'object' ? row.statValue : {};
   const team = row.team && typeof row.team === 'object' ? row.team : {};
 
-  // FotMob's deep-stat rows can use either player/id naming or the
-  // participantName/participantId naming used by its DeepStat model.
-  const name = row.name ?? row.playerName ?? row.fullName
-    ?? row.participantName ?? row.participant_name ?? row.entityName
-    ?? player.name ?? player.playerName ?? player.fullName;
-  const id = normalizeId(row.id ?? row.playerId ?? row.participantId
-    ?? row.particpiantId ?? row.participant_id ?? row.entityId
-    ?? player.id ?? player.playerId ?? player.participantId);
-  const rating = num(
-    row.rating ?? row.averageRating ?? row.avgRating
-    ?? row.value
+  const name = row.name ?? row.playerName ?? row.fullName ?? row.participantName
+    ?? row.participant_name ?? participant.name ?? player.name ?? player.playerName ?? player.fullName;
+  const id = normalizeId(row.id ?? row.playerId ?? row.participantId ?? row.particpiantId
+    ?? row.participant_id ?? participant.id ?? player.id ?? player.playerId ?? player.participantId);
+  const rating = num(row.rating ?? row.averageRating ?? row.avgRating ?? row.value
+    ?? participant.value ?? participant.statValue
     ?? (typeof row.statValue === 'string' ? row.statValue : null)
-    ?? statValue.value ?? statValue.num ?? statValue.rating
-    ?? statValue.averageRating ?? statValue.displayValue ?? statValue.formatted
-  );
+    ?? statValue.value ?? statValue.num ?? statValue.rating ?? statValue.averageRating
+    ?? statValue.displayValue ?? statValue.formatted);
 
   if (!name || !id || rating === null || rating <= 0 || rating >= 10) return;
 
@@ -82,29 +80,12 @@ function addPlayer(out, row, context = {}) {
       id,
       name,
       rating,
-      teamId: row.teamId ?? team.id ?? player.teamId ?? player.team?.id ?? context.teamId ?? null,
-      teamName: row.teamName ?? team.name ?? player.teamName ?? player.team?.name ?? context.teamName ?? null,
+      teamId: row.teamId ?? participant.teamId ?? team.id ?? player.teamId ?? player.team?.id ?? context.teamId ?? null,
+      teamName: row.teamName ?? participant.teamName ?? team.name ?? player.teamName ?? player.team?.name ?? context.teamName ?? null,
       position: row.position ?? row.pos ?? player.position ?? player.pos ?? context.position ?? null,
-      appearances: num(row.appearances ?? row.matches ?? row.gamesPlayed ?? row.played ?? player.appearances ?? player.matches),
+      appearances: num(row.appearances ?? row.matches ?? row.gamesPlayed ?? row.played ?? participant.matchesPlayed ?? player.appearances ?? player.matches),
       photo: row.photo ?? row.image ?? row.img ?? player.photo ?? player.image ?? player.img ?? null
     });
-  }
-}
-
-function walkForPlayers(node, out, context = {}) {
-  if (!node || typeof node !== 'object') return;
-  if (Array.isArray(node)) {
-    for (const item of node) walkForPlayers(item, out, context);
-    return;
-  }
-  const merged = { ...context };
-  for (const key of ['teamId', 'teamName', 'position', 'pos']) {
-    if (node[key] !== undefined && node[key] !== null) merged[key] = node[key];
-  }
-  addPlayer(out, node, merged);
-  for (const [k, v] of Object.entries(node)) {
-    if (k === 'rating' || k === 'averageRating' || k === 'avgRating') continue;
-    if (v && typeof v === 'object') walkForPlayers(v, out, merged);
   }
 }
 
@@ -112,20 +93,36 @@ function parsePlayers(data) {
   const out = new Map();
   const statsData = Array.isArray(data?.statsData) ? data.statsData : [];
   for (const row of statsData) addPlayer(out, row);
-  if (out.size < 20) walkForPlayers(data, out);
+
+  // data.fotmob.com season files use TopLists -> StatList.
+  for (const board of (Array.isArray(data?.TopLists) ? data.TopLists : [])) {
+    const rows = Array.isArray(board?.StatList) ? board.StatList : [];
+    for (const row of rows) addPlayer(out, row);
+  }
+
+  if (out.size < 20) walk(data, out);
   return [...out.values()];
+}
+
+function walk(node, out, context = {}) {
+  if (!node || typeof node !== 'object') return;
+  if (Array.isArray(node)) {
+    for (const x of node) walk(x, out, context);
+    return;
+  }
+  const next = { ...context };
+  for (const key of ['teamId', 'teamName', 'position', 'pos']) {
+    if (node[key] !== undefined && node[key] !== null) next[key] = node[key];
+  }
+  addPlayer(out, node, next);
+  for (const [k, v] of Object.entries(node)) {
+    if (k === 'rating' || k === 'averageRating' || k === 'avgRating') continue;
+    if (v && typeof v === 'object') walk(v, out, next);
+  }
 }
 
 async function getSeasonData() {
   return fotmob('/api/data/leagues', { id: LEAGUE_ID });
-}
-
-function seasonCandidates(input) {
-  const s = String(input || '').trim();
-  const m = s.match(/^(\d{4})[\/-](\d{4})$/);
-  if (!m) return [s];
-  const a = m[1], b = m[2];
-  return [s, `${a}/${b}`, `${a}-${b}`, `${a}${b}`];
 }
 
 async function getRatings(season) {
@@ -134,58 +131,31 @@ async function getRatings(season) {
   const requested = String(season || meta?.details?.selectedSeason || '').replace('-', '/');
   const match = seasons.find(x => String(x.id ?? '').replace('-', '/') === requested)
     || seasons.find(x => String(x.name ?? '').replace('-', '/') === requested);
-  const canonical = match?.id || requested;
-  const candidates = seasonCandidates(canonical);
-  let lastError = null;
-  const merged = new Map();
+  const canonical = String(match?.id || requested);
 
-  const variants = [
-    {}, { page: 1 }, { page: 2 }, { page: 3 }, { page: 4 }, { page: 5 },
-    { page: 6 }, { page: 7 }, { page: 8 }, { limit: 100 }, { limit: 200 },
-    { limit: 500 }, { limit: 1000 }, { page: 1, limit: 100 },
-    { page: 2, limit: 100 }, { page: 3, limit: 100 }, { page: 4, limit: 100 },
-    { page: 5, limit: 100 }, { page: 6, limit: 100 }
-  ];
-
-  for (const candidate of candidates) {
-    for (const extra of variants) {
-      try {
-        const data = await fotmob('/api/data/leagueseasondeepstats', {
-          id: LEAGUE_ID,
-          season: candidate,
-          type: 'players',
-          stat: 'rating',
-          ...extra
-        });
-        for (const p of parsePlayers(data)) {
-          const existing = merged.get(p.id);
-          if (!existing || p.rating > existing.rating) merged.set(p.id, p);
-        }
-      } catch (e) {
-        lastError = e;
-      }
-    }
-    if (merged.size > 20) {
-      return {
-        season: canonical,
-        players: [...merged.values()].sort((a, b) => b.rating - a.rating || a.name.localeCompare(b.name))
-      };
-    }
-  }
-
-  for (const candidate of candidates) {
+  // This is the important path: FotMob publishes the complete season stat
+  // board as data.fotmob.com/stats/<league>/season/<season>/rating.json.
+  // Unlike leagueseasondeepstats, this feed is not the truncated ~62-row
+  // table we were receiving before.
+  const candidates = [canonical, canonical.replace('-', '/')];
+  for (const seasonId of candidates) {
     try {
-      const data = await fotmob('/api/data/leagues', { id: LEAGUE_ID, season: candidate });
-      const players = parsePlayers(data).filter(p => p.rating !== null);
-      if (players.length > 20) {
-        return { season: canonical, players: players.sort((a, b) => b.rating - a.rating || a.name.localeCompare(b.name)) };
-      }
+      const data = await getJson(DATA, `/stats/${LEAGUE_ID}/season/${seasonId}/rating.json`);
+      const players = parsePlayers(data)
+        .sort((a, b) => b.rating - a.rating || a.name.localeCompare(b.name));
+      if (players.length > 20) return { season: canonical, players };
     } catch (e) {
-      lastError = e;
+      console.warn(e.message);
     }
   }
 
-  throw new Error(lastError?.message || 'Could not find Premier League player ratings for that season.');
+  // Fallback to the API endpoint if the CDN season file is unavailable.
+  const data = await fotmob('/api/data/leagueseasondeepstats', {
+    id: LEAGUE_ID, season: canonical, type: 'players', stat: 'rating'
+  });
+  const players = parsePlayers(data).sort((a, b) => b.rating - a.rating || a.name.localeCompare(b.name));
+  if (players.length > 20) return { season: canonical, players };
+  throw new Error('Could not find the complete Premier League player rating table from FotMob.');
 }
 
 app.get('/api/seasons', async (_req, res) => {
@@ -212,8 +182,7 @@ app.get('/api/search', async (req, res) => {
   try {
     const term = String(req.query.term || '').trim();
     if (term.length < 2) return res.json({ suggestions: [] });
-    const data = await fotmob('/api/data/search/suggest', { term, hits: 20, lang: 'en' });
-    res.json(data);
+    res.json(await fotmob('/api/data/search/suggest', { term, hits: 20, lang: 'en' }));
   } catch (e) {
     res.status(502).json({ error: e.message });
   }
