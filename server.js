@@ -61,10 +61,6 @@ function addPlayer(out, row, context = {}) {
   const name = row.name ?? row.playerName ?? row.fullName
     ?? player.name ?? player.playerName ?? player.fullName;
   const id = normalizeId(row.id ?? row.playerId ?? player.id ?? player.playerId);
-
-  // Deep-stats responses use statValue for the selected statistic. Different
-  // FotMob versions have used value, num, displayValue, formatted, or the
-  // value itself, so accept all of them.
   const rating = num(
     row.rating ?? row.averageRating ?? row.avgRating
     ?? row.value
@@ -96,14 +92,11 @@ function walkForPlayers(node, out, context = {}) {
     for (const item of node) walkForPlayers(item, out, context);
     return;
   }
-
   const merged = { ...context };
   for (const key of ['teamId', 'teamName', 'position', 'pos']) {
     if (node[key] !== undefined && node[key] !== null) merged[key] = node[key];
   }
-
   addPlayer(out, node, merged);
-
   for (const [k, v] of Object.entries(node)) {
     if (k === 'rating' || k === 'averageRating' || k === 'avgRating') continue;
     if (v && typeof v === 'object') walkForPlayers(v, out, merged);
@@ -112,18 +105,10 @@ function walkForPlayers(node, out, context = {}) {
 
 function parsePlayers(data) {
   const out = new Map();
-
-  // This is the canonical shape of /api/data/leagueseasondeepstats:
-  // { statsData: [{ id, name, team, statValue: {...} }, ...] }.
-  // Parse it directly before the recursive fallback so future layout changes
-  // in the rest of the response cannot hide the actual table rows.
   const statsData = Array.isArray(data?.statsData) ? data.statsData : [];
   for (const row of statsData) addPlayer(out, row);
-
-  // Keep a recursive fallback for league responses and older FotMob shapes.
   if (out.size < 20) walkForPlayers(data, out);
-
-  return [...out.values()].sort((a, b) => b.rating - a.rating || a.name.localeCompare(b.name));
+  return [...out.values()];
 }
 
 async function getSeasonData() {
@@ -147,19 +132,55 @@ async function getRatings(season) {
   const canonical = match?.id || requested;
   const candidates = seasonCandidates(canonical);
   let lastError = null;
+  const merged = new Map();
+
+  // FotMob's table can return a limited first page. Request several common
+  // pagination shapes and merge the rows so the draft sees the full player pool.
+  const variants = [
+    {},
+    { page: 1 },
+    { page: 2 },
+    { page: 3 },
+    { page: 4 },
+    { page: 5 },
+    { page: 6 },
+    { page: 7 },
+    { page: 8 },
+    { limit: 100 },
+    { limit: 200 },
+    { limit: 500 },
+    { limit: 1000 },
+    { page: 1, limit: 100 },
+    { page: 2, limit: 100 },
+    { page: 3, limit: 100 },
+    { page: 4, limit: 100 },
+    { page: 5, limit: 100 },
+    { page: 6, limit: 100 }
+  ];
 
   for (const candidate of candidates) {
-    try {
-      const data = await fotmob('/api/data/leagueseasondeepstats', {
-        id: LEAGUE_ID,
-        season: candidate,
-        type: 'players',
-        stat: 'rating'
-      });
-      const players = parsePlayers(data).filter(p => p.rating !== null);
-      if (players.length > 20) return { season: canonical, players };
-    } catch (e) {
-      lastError = e;
+    for (const extra of variants) {
+      try {
+        const data = await fotmob('/api/data/leagueseasondeepstats', {
+          id: LEAGUE_ID,
+          season: candidate,
+          type: 'players',
+          stat: 'rating',
+          ...extra
+        });
+        for (const p of parsePlayers(data)) {
+          const existing = merged.get(p.id);
+          if (!existing || p.rating > existing.rating) merged.set(p.id, p);
+        }
+      } catch (e) {
+        lastError = e;
+      }
+    }
+    if (merged.size > 20) {
+      return {
+        season: canonical,
+        players: [...merged.values()].sort((a, b) => b.rating - a.rating || a.name.localeCompare(b.name))
+      };
     }
   }
 
@@ -167,7 +188,9 @@ async function getRatings(season) {
     try {
       const data = await fotmob('/api/data/leagues', { id: LEAGUE_ID, season: candidate });
       const players = parsePlayers(data).filter(p => p.rating !== null);
-      if (players.length > 20) return { season: canonical, players };
+      if (players.length > 20) {
+        return { season: canonical, players: players.sort((a, b) => b.rating - a.rating || a.name.localeCompare(b.name)) };
+      }
     } catch (e) {
       lastError = e;
     }
