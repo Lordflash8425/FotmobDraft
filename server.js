@@ -42,13 +42,53 @@ async function fotmob(pathname, params = {}) {
 function num(v) {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
   if (typeof v === 'string') {
-    const n = Number(v.replace(',', '.'));
+    const cleaned = v.replace(',', '.').replace(/[^0-9.+-]/g, '');
+    const n = Number(cleaned);
     return Number.isFinite(n) ? n : null;
   }
   return null;
 }
 
 function normalizeId(v) { return v === undefined || v === null ? null : String(v); }
+
+function addPlayer(out, row, context = {}) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return;
+
+  const player = row.player && typeof row.player === 'object' ? row.player : {};
+  const statValue = row.statValue && typeof row.statValue === 'object' ? row.statValue : {};
+  const team = row.team && typeof row.team === 'object' ? row.team : {};
+
+  const name = row.name ?? row.playerName ?? row.fullName
+    ?? player.name ?? player.playerName ?? player.fullName;
+  const id = normalizeId(row.id ?? row.playerId ?? player.id ?? player.playerId);
+
+  // Deep-stats responses use statValue for the selected statistic. Different
+  // FotMob versions have used value, num, displayValue, formatted, or the
+  // value itself, so accept all of them.
+  const rating = num(
+    row.rating ?? row.averageRating ?? row.avgRating
+    ?? row.value
+    ?? (typeof row.statValue === 'string' ? row.statValue : null)
+    ?? statValue.value ?? statValue.num ?? statValue.rating
+    ?? statValue.averageRating ?? statValue.displayValue ?? statValue.formatted
+  );
+
+  if (!name || !id || rating === null || rating <= 0 || rating >= 10) return;
+
+  const existing = out.get(id);
+  if (!existing || rating > existing.rating) {
+    out.set(id, {
+      id,
+      name,
+      rating,
+      teamId: row.teamId ?? team.id ?? player.teamId ?? player.team?.id ?? context.teamId ?? null,
+      teamName: row.teamName ?? team.name ?? player.teamName ?? player.team?.name ?? context.teamName ?? null,
+      position: row.position ?? row.pos ?? player.position ?? player.pos ?? context.position ?? null,
+      appearances: num(row.appearances ?? row.matches ?? row.gamesPlayed ?? row.played ?? player.appearances ?? player.matches),
+      photo: row.photo ?? row.image ?? row.img ?? player.photo ?? player.image ?? player.img ?? null
+    });
+  }
+}
 
 function walkForPlayers(node, out, context = {}) {
   if (!node || typeof node !== 'object') return;
@@ -62,34 +102,7 @@ function walkForPlayers(node, out, context = {}) {
     if (node[key] !== undefined && node[key] !== null) merged[key] = node[key];
   }
 
-  // FotMob's deep-stat table stores the player identity separately from the
-  // stat value. Support both the old flat shape and the current nested shape.
-  const player = node.player && typeof node.player === 'object' ? node.player : {};
-  const statValue = node.statValue && typeof node.statValue === 'object' ? node.statValue : {};
-
-  const name = node.name ?? node.playerName ?? node.fullName
-    ?? player.name ?? player.playerName ?? player.fullName;
-  const id = normalizeId(node.id ?? node.playerId ?? player.id ?? player.playerId);
-  const rating = num(
-    node.rating ?? node.averageRating ?? node.avgRating
-    ?? statValue.value ?? statValue.rating ?? statValue.averageRating
-  );
-
-  if (name && id && rating !== null && rating > 0 && rating < 10) {
-    const existing = out.get(id);
-    if (!existing || rating > existing.rating) {
-      out.set(id, {
-        id,
-        name,
-        rating,
-        teamId: node.teamId ?? node.team?.id ?? player.teamId ?? player.team?.id ?? merged.teamId ?? null,
-        teamName: node.teamName ?? node.team?.name ?? player.teamName ?? player.team?.name ?? merged.teamName ?? null,
-        position: node.position ?? node.pos ?? player.position ?? player.pos ?? merged.position ?? null,
-        appearances: num(node.appearances ?? node.matches ?? node.gamesPlayed ?? node.played ?? player.appearances ?? player.matches),
-        photo: node.photo ?? node.image ?? node.img ?? player.photo ?? player.image ?? player.img ?? null
-      });
-    }
-  }
+  addPlayer(out, node, merged);
 
   for (const [k, v] of Object.entries(node)) {
     if (k === 'rating' || k === 'averageRating' || k === 'avgRating') continue;
@@ -99,7 +112,17 @@ function walkForPlayers(node, out, context = {}) {
 
 function parsePlayers(data) {
   const out = new Map();
-  walkForPlayers(data, out);
+
+  // This is the canonical shape of /api/data/leagueseasondeepstats:
+  // { statsData: [{ id, name, team, statValue: {...} }, ...] }.
+  // Parse it directly before the recursive fallback so future layout changes
+  // in the rest of the response cannot hide the actual table rows.
+  const statsData = Array.isArray(data?.statsData) ? data.statsData : [];
+  for (const row of statsData) addPlayer(out, row);
+
+  // Keep a recursive fallback for league responses and older FotMob shapes.
+  if (out.size < 20) walkForPlayers(data, out);
+
   return [...out.values()].sort((a, b) => b.rating - a.rating || a.name.localeCompare(b.name));
 }
 
