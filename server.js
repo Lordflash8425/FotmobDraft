@@ -66,9 +66,13 @@ function addPlayer(out, row, context = {}) {
     ?? row.participant_name ?? participant.name ?? player.name ?? player.playerName ?? player.fullName;
   const id = normalizeId(row.id ?? row.playerId ?? row.participantId ?? row.particpiantId
     ?? row.participant_id ?? participant.id ?? player.id ?? player.playerId ?? player.participantId);
+
+  // FotMob has returned statValue in several shapes over time: a number,
+  // a string, or an object containing value/displayValue. Handle all of them.
+  const rawStatValue = row.statValue;
   const rating = num(row.rating ?? row.averageRating ?? row.avgRating ?? row.value
+    ?? (typeof rawStatValue === 'number' || typeof rawStatValue === 'string' ? rawStatValue : null)
     ?? participant.value ?? statValue.value ?? stat.value
-    ?? (typeof row.statValue === 'string' ? row.statValue : null)
     ?? statValue.num ?? statValue.rating ?? statValue.averageRating
     ?? statValue.displayValue ?? statValue.formatted);
 
@@ -138,9 +142,8 @@ async function getRatings(season) {
     || seasons.find(x => String(x.name ?? '').replace('-', '/') === requested);
   const canonical = String(match?.id || requested);
 
-  // The public FotMob stats page has an explicit 1000-player route. Search
-  // results confirm that this route exposes ranks well beyond the first 62.
-  // Read its server-rendered JSON instead of the truncated deepstats table.
+  // First try FotMob's public stats page. The explicit 1000-player route is
+  // what the current site uses for the expanded player leaderboard.
   const pageUrl = `${FOTMOB}/leagues/${LEAGUE_ID}/stats/season/${canonical}/players/rating/premier-league-players-1000`;
   try {
     const html = await requestText(pageUrl);
@@ -158,8 +161,8 @@ async function getRatings(season) {
     console.warn('Stats page scrape failed:', e.message);
   }
 
-  // Reliable API fallback. This may return only the currently ranked subset,
-  // but it is better than failing the entire draft if the page is unavailable.
+  // API fallback. The deepstats route is a verified current FotMob route and
+  // returns rows under statsData/statValue.
   const data = await fotmob('/api/data/leagueseasondeepstats', {
     id: LEAGUE_ID, season: canonical, type: 'players', stat: 'rating'
   });
