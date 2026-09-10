@@ -7,12 +7,23 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_FILE = path.join(__dirname, 'public', 'players.json');
+const INDEX_FILE = path.join(__dirname, 'public', 'index.html');
 const FOTMOB_URL = 'https://www.fotmob.com/leagues/47/stats/season/36781/players/rating/premier-league-1000-players';
 const ALLORIGINS = 'https://api.allorigins.win/raw?url=';
+const SPORTSDB = 'https://www.thesportsdb.com/api/v1/json/3/searchplayers.php?p=';
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
-app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+
+app.get('/', async (_req, res) => {
+  try {
+    let html = await fs.readFile(INDEX_FILE, 'utf8');
+    if (!html.includes('/enhancements.js')) html = html.replace('</body>', '<script src="/enhancements.js"></script></body>');
+    res.type('html').send(html);
+  } catch {
+    res.sendFile(INDEX_FILE);
+  }
+});
 
 function slugId(name, index = 0) {
   const base = String(name).toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
@@ -77,6 +88,30 @@ async function readRatings() {
   memoryAt = Date.now();
   return data;
 }
+
+const metaCache = new Map();
+function normalizeName(s) {
+  return String(s || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+app.get('/api/player-meta', async (req, res) => {
+  const name = String(req.query.name || '').trim();
+  if (name.length < 2) return res.json({});
+  const cacheKey = normalizeName(name);
+  if (metaCache.has(cacheKey)) return res.json(metaCache.get(cacheKey));
+  try {
+    const r = await fetch(SPORTSDB + encodeURIComponent(name), { headers: { 'User-Agent': 'FotMobFantasyDraft/1.0' } });
+    if (!r.ok) return res.json({});
+    const data = await r.json();
+    const people = Array.isArray(data.player) ? data.player : [];
+    const target = people.sort((a,b)=>Number(normalizeName(a.strPlayer)===cacheKey)-Number(normalizeName(b.strPlayer)===cacheKey)).at(-1) || people[0];
+    const meta = target ? { photo: target.strThumb || target.strCutout || target.strRender || null, position: target.strPosition || null } : {};
+    metaCache.set(cacheKey, meta);
+    res.json(meta);
+  } catch {
+    res.json({});
+  }
+});
 
 app.get('/api/seasons', async (_req, res) => {
   try {
