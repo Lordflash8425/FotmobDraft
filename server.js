@@ -13,8 +13,8 @@ const ALLORIGINS = 'https://api.allorigins.win/raw?url=';
 const SPORTSDB = 'https://www.thesportsdb.com/api/v1/json/3/searchplayers.php?p=';
 
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
 
+// Serve the homepage before express.static so the enhancement script is actually injected.
 app.get('/', async (_req, res) => {
   try {
     let html = await fs.readFile(INDEX_FILE, 'utf8');
@@ -24,6 +24,8 @@ app.get('/', async (_req, res) => {
     res.sendFile(INDEX_FILE);
   }
 });
+
+app.use(express.static(path.join(__dirname, 'public')));
 
 function slugId(name, index = 0) {
   const base = String(name).toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
