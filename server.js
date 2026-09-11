@@ -33,6 +33,18 @@ function slugId(name, index = 0) {
   return `fotmob-${base || 'player'}${index ? `-${index}` : ''}`;
 }
 
+function normalizeStatic(data) {
+  if (!data || !Array.isArray(data.players)) return data;
+  const seen = new Map();
+  data.players = data.players.map(p => {
+    const base = slugId(p.name);
+    const count = seen.get(base) || 0;
+    seen.set(base, count + 1);
+    return { ...p, id: p.id || slugId(p.name, count) };
+  });
+  return data;
+}
+
 function parseFotMobHtml(html) {
   const text = String(html)
     .replace(/<script[\s\S]*?<\/script>/gi, '\n')
@@ -87,13 +99,14 @@ let memory = null;
 let memoryAt = 0;
 async function readRatings() {
   if (memory && Date.now() - memoryAt < 5 * 60 * 1000) return memory;
+  let staticData = null;
   try {
     const text = await fs.readFile(DATA_FILE, 'utf8');
-    const data = JSON.parse(text);
-    if (Array.isArray(data.players) && data.players.length >= 250) {
-      memory = data;
+    staticData = normalizeStatic(JSON.parse(text));
+    if (Array.isArray(staticData.players) && staticData.players.length >= 250) {
+      memory = staticData;
       memoryAt = Date.now();
-      return data;
+      return staticData;
     }
   } catch {}
   try {
@@ -102,11 +115,11 @@ async function readRatings() {
     memoryAt = Date.now();
     return data;
   } catch (e) {
-    try {
-      const text = await fs.readFile(DATA_FILE, 'utf8');
-      const data = JSON.parse(text);
-      if (Array.isArray(data.players) && data.players.length >= 50) return data;
-    } catch {}
+    if (staticData && Array.isArray(staticData.players) && staticData.players.length >= 50) {
+      memory = staticData;
+      memoryAt = Date.now();
+      return staticData;
+    }
     throw e;
   }
 }
