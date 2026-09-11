@@ -140,7 +140,7 @@ app.get('/api/player-meta', async (req,res)=>{
     const data=await r.json();
     const people=Array.isArray(data.player)?data.player:[];
     const target=people.find(x=>normalizeName(x.strPlayer)===cacheKey)||people[0];
-    const meta=target?{photo:target.strThumb||target.strCutout||target.strRender||null,position:target.strPosition||null}:{};
+    const meta=target?{photo:target.strCutout||target.strThumb||target.strRender||null,position:target.strPosition||null}:{};
     metaCache.set(cacheKey,meta);res.json(meta);
   }catch{res.json({});}
 });
