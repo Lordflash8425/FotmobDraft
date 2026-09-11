@@ -8,13 +8,13 @@ const PORT = process.env.PORT || 3000;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_FILE = path.join(__dirname, 'public', 'players.json');
 const INDEX_FILE = path.join(__dirname, 'public', 'index.html');
-const FOTMOB_URL = 'https://www.fotmob.com/leagues/47/stats/season/36781/players/rating/premier-league-1000-players';
+const FOTMOB_URL = 'https://www.fotmob.com/leagues/47/stats/season/36781/players/rating/premier-league-teams-players';
 const ALLORIGINS = 'https://api.allorigins.win/raw?url=';
+const JINA = 'https://r.jina.ai/http://';
 const SPORTSDB = 'https://www.thesportsdb.com/api/v1/json/3/searchplayers.php?p=';
 
 app.use(express.json());
 
-// Serve the homepage before express.static so the enhancement script is actually injected.
 app.get('/', async (_req, res) => {
   try {
     let html = await fs.readFile(INDEX_FILE, 'utf8');
@@ -44,7 +44,6 @@ function parseFotMobHtml(html) {
     .replace(/&#39;/gi, "'")
     .replace(/&quot;/gi, '"')
     .replace(/\s+/g, ' ');
-
   const players = [];
   const seen = new Map();
   const re = /(?:^|\s)(\d+)\s+(?:\d+)\s+(.+?)\s+Player of the Match:\s+\d+\s+(\d+(?:\.\d+)?)(?=\s+\d+\s+\d+\s+|\s*$)/gi;
@@ -58,91 +57,83 @@ function parseFotMobHtml(html) {
     seen.set(base, count + 1);
     players.push({ id: slugId(name, count), name, rating, teamId: null, teamName: null, position: null, appearances: null, photo: null });
   }
+  return [...new Map(players.map(p => [p.id, p])).values()].sort((a,b)=>b.rating-a.rating||a.name.localeCompare(b.name));
+}
 
-  const unique = new Map(players.map(p => [p.id, p]));
-  return [...unique.values()].sort((a, b) => b.rating - a.rating || a.name.localeCompare(b.name));
+async function tryFetch(url, headers = {}) {
+  const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; FotMobFantasyDraft/1.0)', 'Accept': 'text/html,text/plain,*/*', ...headers } });
+  const body = await r.text();
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return body;
 }
 
 async function fetchSnapshot() {
-  const proxy = ALLORIGINS + encodeURIComponent(FOTMOB_URL);
-  const r = await fetch(proxy, {
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; FotMobFantasyDraft/1.0)', 'Accept': 'text/html,text/plain,*/*' }
-  });
-  const html = await r.text();
-  if (!r.ok) throw new Error(`Ratings proxy returned HTTP ${r.status}`);
-  const players = parseFotMobHtml(html);
-  if (players.length < 50) throw new Error(`Ratings proxy returned only ${players.length} players`);
-  return { season: '36781', seasonName: '2026/2027', source: 'FotMob', sourceUrl: FOTMOB_URL, updatedAt: new Date().toISOString(), players };
+  const urls = [FOTMOB_URL, ALLORIGINS + encodeURIComponent(FOTMOB_URL), JINA + FOTMOB_URL.replace(/^https?:\/\//,'')];
+  let lastError;
+  for (const url of urls) {
+    try {
+      const html = await tryFetch(url);
+      const players = parseFotMobHtml(html);
+      if (players.length >= 150) {
+        return { season: '36781', seasonName: '2026/2027', source: 'FotMob', sourceUrl: FOTMOB_URL, updatedAt: new Date().toISOString(), players };
+      }
+      lastError = new Error(`Source returned only ${players.length} players`);
+    } catch (e) { lastError = e; }
+  }
+  throw lastError || new Error('Could not fetch FotMob ratings');
 }
 
 let memory = null;
 let memoryAt = 0;
 async function readRatings() {
+  if (memory && Date.now() - memoryAt < 5 * 60 * 1000) return memory;
   try {
     const text = await fs.readFile(DATA_FILE, 'utf8');
     const data = JSON.parse(text);
-    if (Array.isArray(data.players) && data.players.length >= 50) return data;
+    if (Array.isArray(data.players) && data.players.length >= 250) {
+      memory = data;
+      memoryAt = Date.now();
+      return data;
+    }
   } catch {}
-
-  if (memory && Date.now() - memoryAt < 5 * 60 * 1000) return memory;
-  const data = await fetchSnapshot();
-  memory = data;
-  memoryAt = Date.now();
-  return data;
+  try {
+    const data = await fetchSnapshot();
+    memory = data;
+    memoryAt = Date.now();
+    return data;
+  } catch (e) {
+    try {
+      const text = await fs.readFile(DATA_FILE, 'utf8');
+      const data = JSON.parse(text);
+      if (Array.isArray(data.players) && data.players.length >= 50) return data;
+    } catch {}
+    throw e;
+  }
 }
 
 const metaCache = new Map();
 function normalizeName(s) {
-  return String(s || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return String(s || '').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/[^a-z0-9]+/g,' ').trim();
 }
 
-app.get('/api/player-meta', async (req, res) => {
-  const name = String(req.query.name || '').trim();
-  if (name.length < 2) return res.json({});
-  const cacheKey = normalizeName(name);
-  if (metaCache.has(cacheKey)) return res.json(metaCache.get(cacheKey));
-  try {
-    const r = await fetch(SPORTSDB + encodeURIComponent(name), { headers: { 'User-Agent': 'FotMobFantasyDraft/1.0' } });
-    if (!r.ok) return res.json({});
-    const data = await r.json();
-    const people = Array.isArray(data.player) ? data.player : [];
-    const target = people.sort((a,b)=>Number(normalizeName(a.strPlayer)===cacheKey)-Number(normalizeName(b.strPlayer)===cacheKey)).at(-1) || people[0];
-    const meta = target ? { photo: target.strThumb || target.strCutout || target.strRender || null, position: target.strPosition || null } : {};
-    metaCache.set(cacheKey, meta);
-    res.json(meta);
-  } catch {
-    res.json({});
-  }
+app.get('/api/player-meta', async (req,res)=>{
+  const name=String(req.query.name||'').trim();
+  if(name.length<2)return res.json({});
+  const cacheKey=normalizeName(name);
+  if(metaCache.has(cacheKey))return res.json(metaCache.get(cacheKey));
+  try{
+    const r=await fetch(SPORTSDB+encodeURIComponent(name),{headers:{'User-Agent':'FotMobFantasyDraft/1.0'}});
+    if(!r.ok)return res.json({});
+    const data=await r.json();
+    const people=Array.isArray(data.player)?data.player:[];
+    const target=people.find(x=>normalizeName(x.strPlayer)===cacheKey)||people[0];
+    const meta=target?{photo:target.strThumb||target.strCutout||target.strRender||null,position:target.strPosition||null}:{};
+    metaCache.set(cacheKey,meta);res.json(meta);
+  }catch{res.json({});}
 });
 
-app.get('/api/seasons', async (_req, res) => {
-  try {
-    const data = await readRatings();
-    res.json({ seasons: [{ id: data.season, name: data.seasonName }], selected: data.season });
-  } catch (e) {
-    console.error(e);
-    res.status(503).json({ error: 'Could not load the current Premier League ratings.' });
-  }
-});
+app.get('/api/seasons',async(_req,res)=>{try{const data=await readRatings();res.json({seasons:[{id:data.season,name:data.seasonName}],selected:data.season});}catch(e){console.error(e);res.status(503).json({error:'Could not load the current Premier League ratings.'});}});
+app.get('/api/players',async(_req,res)=>{try{res.json(await readRatings());}catch(e){console.error(e);res.status(503).json({error:'Could not load the current Premier League ratings.'});}});
+app.get('/api/search',async(req,res)=>{try{const term=String(req.query.term||'').trim().toLowerCase();if(term.length<2)return res.json({suggestions:[]});const data=await readRatings();res.json({suggestions:data.players.filter(p=>p.name.toLowerCase().includes(term)).slice(0,20).map(p=>({name:p.name,id:p.id}))});}catch(e){res.status(503).json({error:'Could not load the current Premier League ratings.'});}});
 
-app.get('/api/players', async (_req, res) => {
-  try {
-    res.json(await readRatings());
-  } catch (e) {
-    console.error(e);
-    res.status(503).json({ error: 'Could not load the current Premier League ratings.' });
-  }
-});
-
-app.get('/api/search', async (req, res) => {
-  try {
-    const term = String(req.query.term || '').trim().toLowerCase();
-    if (term.length < 2) return res.json({ suggestions: [] });
-    const data = await readRatings();
-    res.json({ suggestions: data.players.filter(p => p.name.toLowerCase().includes(term)).slice(0, 20).map(p => ({ name: p.name, id: p.id })) });
-  } catch (e) {
-    res.status(503).json({ error: 'Could not load the current Premier League ratings.' });
-  }
-});
-
-app.listen(PORT, () => console.log(`FotMob Fantasy Draft running on port ${PORT}`));
+app.listen(PORT,()=>console.log(`FotMob Fantasy Draft running on port ${PORT}`));
