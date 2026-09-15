@@ -56,14 +56,28 @@ async function loadTeamMap(){
   try{
     const r=await fetch(SPORTSDB_TEAMS); if(!r.ok)throw new Error(`teams HTTP ${r.status}`);
     const d=await r.json(); const teams=Array.isArray(d.teams)?d.teams:[];
-    await Promise.all(teams.map(async t=>{try{const rr=await fetch(SPORTSDB_TEAM_PLAYERS+encodeURIComponent(t.idTeam));if(!rr.ok)return;const dd=await rr.json();for(const p of (Array.isArray(dd.player)?dd.player:[])){const n=normalizeName(p.strPlayer);if(n)map.set(n,{teamName:t.strTeam||null,teamId:t.idTeam||null});}}catch{}}));
+    await Promise.all(teams.map(async t=>{try{const rr=await fetch(SPORTSDB_TEAM_PLAYERS+encodeURIComponent(t.idTeam));if(!rr.ok)return;const dd=await rr.json();for(const p of (Array.isArray(dd.player)?dd.player:[])){const n=normalizeName(p.strPlayer);if(n)map.set(n,{teamName:t.strTeam||null,teamId:t.idTeam||null,photo:p.strCutout||p.strThumb||p.strRender||null,position:p.strPosition||null});}}catch{}}));
     teamMap=map;teamMapAt=Date.now();
   }catch{if(!teamMap)teamMap=new Map();}
   return teamMap;
 }
 async function enrichTeams(data){
   const map=await loadTeamMap();
-  for(const p of data.players||[]){const t=map.get(normalizeName(p.name));if(t){p.teamName=t.teamName;p.teamId=t.teamId;}}
+  for(const p of data.players||[]){
+    let t=map.get(normalizeName(p.name));
+    // FotMob lists Arsenal's centre-back simply as "Gabriel".
+    if(!t&&normalizeName(p.name)==='gabriel') t={teamName:'Arsenal',teamId:null,photo:null,position:'CB'};
+    if(t){
+      p.teamName=t.teamName||p.teamName||null;
+      p.teamId=t.teamId||p.teamId||null;
+      p.position=p.position||t.position||null;
+      p.photo=p.photo||t.photo||null;
+    }
+    if(normalizeName(p.name)==='gabriel'&&normalizeName(p.teamName)==='arsenal'){
+      p.name='Gabriel Magalhães';
+      p.rating=7.42;
+    }
+  }
   return data;
 }
 
@@ -71,8 +85,24 @@ let memory=null,memoryAt=0;
 async function readRatings(){
   if(memory&&Date.now()-memoryAt<5*60*1000)return memory;
   let staticData=null;
-  try{const text=await fs.readFile(DATA_FILE,'utf8');staticData=normalizeStatic(JSON.parse(text));if(Array.isArray(staticData.players)&&staticData.players.length>=250){await enrichTeams(staticData);memory=staticData;memoryAt=Date.now();return staticData;}}catch{}
-  try{const data=await fetchSnapshot();await enrichTeams(data);memory=data;memoryAt=Date.now();return data;}catch(e){if(staticData&&Array.isArray(staticData.players)&&staticData.players.length>=50){await enrichTeams(staticData);memory=staticData;memoryAt=Date.now();return staticData;}throw e;}
+  try{const text=await fs.readFile(DATA_FILE,'utf8');staticData=normalizeStatic(JSON.parse(text));}catch{}
+
+  // Prefer a fresh FotMob table. The bundled file is only the safety net when FotMob blocks Vercel.
+  try{
+    const live=await fetchSnapshot();
+    if(staticData&&Array.isArray(staticData.players)){
+      const liveNames=new Set(live.players.map(p=>normalizeName(p.name)));
+      // Keep any players present in our vetted snapshot if the live parser missed them.
+      for(const p of staticData.players){if(!liveNames.has(normalizeName(p.name)))live.players.push({...p});}
+      live.players.sort((a,b)=>Number(b.rating||0)-Number(a.rating||0)||a.name.localeCompare(b.name));
+    }
+    await enrichTeams(live);memory=live;memoryAt=Date.now();return live;
+  }catch(e){
+    if(staticData&&Array.isArray(staticData.players)&&staticData.players.length>=50){
+      await enrichTeams(staticData);memory=staticData;memoryAt=Date.now();return staticData;
+    }
+    throw e;
+  }
 }
 
 const metaCache=new Map();
