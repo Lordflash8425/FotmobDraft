@@ -89,4 +89,8 @@ app.get('/api/players', async (req,res) => {
 
 app.get('/api/seasons',(_req,res)=>res.json({seasons:[{id:SEASON_ID,name:SEASON_NAME}],selected:SEASON_ID}));
 
-app.listen(PORT,()=>console.log(`FotMob Fantasy Draft running on port ${PORT}`));
+export default app;
+
+if (!process.env.VERCEL) {
+  app.listen(PORT,()=>console.log(`FotMob Fantasy Draft running on port ${PORT}`));
+}
