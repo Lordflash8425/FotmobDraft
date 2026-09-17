@@ -82,22 +82,23 @@ async function enrichTeams(data){
 }
 
 let memory=null,memoryAt=0;
-async function readRatings(){
-  if(memory&&Date.now()-memoryAt<5*60*1000)return memory;
+async function readRatings(forceRefresh=false){
+  // Normal requests may use the short in-memory cache. A refresh request always bypasses it.
+  if(!forceRefresh&&memory&&Date.now()-memoryAt<5*60*1000)return memory;
   let staticData=null;
   try{const text=await fs.readFile(DATA_FILE,'utf8');staticData=normalizeStatic(JSON.parse(text));}catch{}
 
-  // Prefer a fresh FotMob table. The bundled file is only the safety net when FotMob blocks Vercel.
+  // Always try FotMob first when loading/refreshing. The bundled data is only a fallback.
   try{
     const live=await fetchSnapshot();
     if(staticData&&Array.isArray(staticData.players)){
       const liveNames=new Set(live.players.map(p=>normalizeName(p.name)));
-      // Keep any players present in our vetted snapshot if the live parser missed them.
       for(const p of staticData.players){if(!liveNames.has(normalizeName(p.name)))live.players.push({...p});}
       live.players.sort((a,b)=>Number(b.rating||0)-Number(a.rating||0)||a.name.localeCompare(b.name));
     }
     await enrichTeams(live);memory=live;memoryAt=Date.now();return live;
   }catch(e){
+    console.error('FotMob fetch failed:',e);
     if(staticData&&Array.isArray(staticData.players)&&staticData.players.length>=50){
       await enrichTeams(staticData);memory=staticData;memoryAt=Date.now();return staticData;
     }
@@ -107,7 +108,7 @@ async function readRatings(){
 
 const metaCache=new Map();
 app.get('/api/player-meta',async(req,res)=>{const name=String(req.query.name||'').trim();if(name.length<2)return res.json({});const cacheKey=normalizeName(name);if(metaCache.has(cacheKey))return res.json(metaCache.get(cacheKey));try{const r=await fetch(SPORTSDB+encodeURIComponent(name),{headers:{'User-Agent':'FotMobFantasyDraft/1.0'}});if(!r.ok)return res.json({});const data=await r.json(),people=Array.isArray(data.player)?data.player:[],target=people.find(x=>normalizeName(x.strPlayer)===cacheKey)||people[0];const meta=target?{photo:target.strCutout||target.strThumb||target.strRender||null,position:target.strPosition||null,teamName:target.strTeam||null,teamId:target.idTeam||null}:{};metaCache.set(cacheKey,meta);res.json(meta);}catch{res.json({});}});
-app.get('/api/seasons',async(_req,res)=>{try{const data=await readRatings();res.json({seasons:[{id:data.season,name:data.seasonName}],selected:data.season});}catch(e){console.error(e);res.status(503).json({error:'Could not load the current Premier League ratings.'});}});
-app.get('/api/players',async(_req,res)=>{try{res.json(await readRatings());}catch(e){console.error(e);res.status(503).json({error:'Could not load the current Premier League ratings.'});}});
-app.get('/api/search',async(req,res)=>{try{const term=String(req.query.term||'').trim().toLowerCase();if(term.length<2)return res.json({suggestions:[]});const data=await readRatings();res.json({suggestions:data.players.filter(p=>p.name.toLowerCase().includes(term)||String(p.teamName||'').toLowerCase().includes(term)).slice(0,20).map(p=>({name:p.name,id:p.id}))});}catch(e){res.status(503).json({error:'Could not load the current Premier League ratings.'});}});
+app.get('/api/seasons',async(_req,res)=>{try{const data=await readRatings(false);res.json({seasons:[{id:data.season,name:data.seasonName}],selected:data.season,updatedAt:data.updatedAt||null});}catch(e){console.error(e);res.status(503).json({error:'Could not load the current Premier League ratings.'});}});
+app.get('/api/players',async(req,res)=>{try{const force=String(req.query.refresh||'')==='1'||String(req.query.refresh||'').toLowerCase()==='true';const data=await readRatings(force);res.set('Cache-Control','no-store, no-cache, must-revalidate, proxy-revalidate');res.set('Pragma','no-cache');res.set('Expires','0');res.json(data);}catch(e){console.error(e);res.status(503).json({error:'Could not load the current Premier League ratings.'});}});
+app.get('/api/search',async(req,res)=>{try{const term=String(req.query.term||'').trim().toLowerCase();if(term.length<2)return res.json({suggestions:[]});const data=await readRatings(false);res.json({suggestions:data.players.filter(p=>p.name.toLowerCase().includes(term)||String(p.teamName||'').toLowerCase().includes(term)).slice(0,20).map(p=>({name:p.name,id:p.id}))});}catch(e){res.status(503).json({error:'Could not load the current Premier League ratings.'});}});
 app.listen(PORT,()=>console.log(`FotMob Fantasy Draft running on port ${PORT}`));
