@@ -23,63 +23,42 @@ async function fotmobJson(url) {
   return r.json();
 }
 
-function number(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
+function n(v) {
+  if (typeof v === 'object' && v !== null) return n(v.value ?? v.num ?? v.rating);
+  const x = Number(v);
+  return Number.isFinite(x) ? x : null;
 }
 
-function normalizeName(v) {
+function cleanName(v) {
   return String(v || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
-function playerFromObject(o) {
-  if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
-  const name = o.name || o.playerName || o.fullName || o.player?.name || o.player?.fullName;
-  const rating = number(o.rating?.num ?? o.rating?.value ?? o.rating ?? o.stats?.rating ?? o.value);
-  if (!name || rating === null || rating <= 0 || rating >= 10) return null;
-  const player = o.player && typeof o.player === 'object' ? o.player : o;
-  const team = o.team && typeof o.team === 'object' ? o.team : {};
-  const id = player.id ?? o.id ?? o.playerId ?? null;
-  return {
-    id: id ? String(id) : `name-${normalizeName(name)}`,
-    name: String(name),
-    rating,
-    teamId: player.teamId ?? o.teamId ?? team.id ?? team.idTeam ?? null,
-    teamName: player.teamName ?? o.teamName ?? team.name ?? team.teamName ?? null,
-    position: player.position ?? o.position ?? o.positionName ?? null,
-    photo: id ? `https://images.fotmob.com/image_resources/playerimages/${id}.png` : null
-  };
-}
-
-function collectPlayers(node, out = []) {
-  if (!node) return out;
-  if (Array.isArray(node)) {
-    for (const item of node) {
-      const p = playerFromObject(item);
-      if (p) out.push(p);
-      collectPlayers(item, out);
-    }
-    return out;
-  }
-  if (typeof node === 'object') {
-    const p = playerFromObject(node);
-    if (p) out.push(p);
-    for (const value of Object.values(node)) collectPlayers(value, out);
-  }
-  return out;
-}
-
-function parseRatingData(data) {
-  const raw = collectPlayers(data);
+function parseStatsData(data) {
+  if (!Array.isArray(data?.statsData)) throw new Error('FotMob response did not contain statsData');
   const map = new Map();
-  for (const p of raw) {
-    const key = p.id.startsWith('name-') ? `name:${normalizeName(p.name)}` : `id:${p.id}`;
-    if (!map.has(key)) map.set(key, p);
+  for (const row of data.statsData) {
+    if (!row || typeof row !== 'object') continue;
+    const person = row.player && typeof row.player === 'object' ? row.player : {};
+    const name = row.name || row.playerName || person.name || person.fullName;
+    const rating = n(row.statValue);
+    const id = row.playerId ?? row.id ?? person.id;
+    if (!name || rating === null || rating <= 0 || rating >= 10) continue;
+    const key = id ? `id:${id}` : `name:${cleanName(name)}`;
+    if (!map.has(key)) {
+      map.set(key, {
+        id: String(id || `name-${cleanName(name)}`),
+        name: String(name),
+        rating,
+        teamId: row.teamId ?? person.teamId ?? null,
+        teamName: row.teamName ?? person.teamName ?? null,
+        position: row.position ?? person.position ?? null,
+        photo: id ? `https://images.fotmob.com/image_resources/playerimages/${id}.png` : null
+      });
+    }
   }
-  const players = [...map.values()].filter(p => p.rating !== null);
-  if (players.length < 100) throw new Error(`FotMob rating endpoint returned only ${players.length} usable players`);
-  players.sort((a, b) => b.rating - a.rating || a.name.localeCompare(b.name));
-  return { season: SEASON_ID, seasonName: SEASON_NAME, source: 'FotMob API', sourceUrl: RATING_URL, updatedAt: new Date().toISOString(), players };
+  const players = [...map.values()].sort((a,b)=>b.rating-a.rating || a.name.localeCompare(b.name));
+  if (players.length < 100) throw new Error(`FotMob returned only ${players.length} rated players`);
+  return {season:SEASON_ID,seasonName:SEASON_NAME,source:'FotMob API',sourceUrl:RATING_URL,updatedAt:new Date().toISOString(),players};
 }
 
 let cache = null;
@@ -88,28 +67,26 @@ const CACHE_MS = 60 * 1000;
 
 async function getRatings(force = false) {
   if (!force && cache && Date.now() - cacheAt < CACHE_MS) return cache;
-  const data = parseRatingData(await fotmobJson(RATING_URL));
+  const data = parseStatsData(await fotmobJson(RATING_URL));
   cache = data;
   cacheAt = Date.now();
   return data;
 }
 
-app.get('/api/players', async (req, res) => {
+app.get('/api/players', async (req,res) => {
   try {
     const force = req.query.refresh === '1' || req.query.refresh === 'true';
     const data = await getRatings(force);
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.set('Pragma', 'no-cache');
-    res.set('Expires', '0');
+    res.set('Cache-Control','no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma','no-cache');
+    res.set('Expires','0');
     res.json(data);
-  } catch (e) {
-    console.error('FotMob ratings error:', e);
-    res.status(502).json({ error: `Could not load FotMob ratings: ${e.message}` });
+  } catch(e) {
+    console.error('FotMob ratings error:',e);
+    res.status(502).json({error:`Could not load FotMob ratings: ${e.message}`});
   }
 });
 
-app.get('/api/seasons', (_req, res) => {
-  res.json({ seasons: [{ id: SEASON_ID, name: SEASON_NAME }], selected: SEASON_ID });
-});
+app.get('/api/seasons',(_req,res)=>res.json({seasons:[{id:SEASON_ID,name:SEASON_NAME}],selected:SEASON_ID}));
 
-app.listen(PORT, () => console.log(`FotMob Fantasy Draft running on port ${PORT}`));
+app.listen(PORT,()=>console.log(`FotMob Fantasy Draft running on port ${PORT}`));
